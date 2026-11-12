@@ -13,6 +13,11 @@ services:
       TZ: ${TZ:-UTC}
       HOME: /tmp
       DOTNET_EnableDiagnostics: "0"
+    # 부팅 시 Tailscale이 /etc/resolv.conf를 덮어쓰기 전에 Docker가 시작하면
+    # 컨테이너 DNS가 비어 버린다. 순서에 의존하지 않도록 명시한다.
+    dns:
+      - 100.100.100.100
+      - 1.1.1.1
     read_only: true
     tmpfs:
       - /tmp:size=64m,noexec,nosuid,nodev
