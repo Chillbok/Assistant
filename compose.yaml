@@ -1,11 +1,23 @@
+name: assistant
+
 services:
   bot:
     build: .
-    image: jarvis-bot:dev
+    image: assistant:dev
     restart: unless-stopped
-    env_file: .env
+    env_file:
+      - ${ASSISTANT_ENV:-/home/junho/.config/assistant/env}
     environment:
       TZ: Asia/Seoul
+      HOME: /tmp
+      DOTNET_EnableDiagnostics: "0"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     logging:
       driver: json-file
       options:

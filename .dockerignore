@@ -1,4 +1,8 @@
 .git
 .env
+.env.*
 bin/
 obj/
+data/
+logs/
+README.md

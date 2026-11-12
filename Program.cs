@@ -1,73 +1,64 @@
 using Telegram.Bot;
-using Telegram.Bot.Types;
+using Telegram.Bot.Exceptions;
 
-var token = Environment.GetEnvironmentVariable("TELEGRAM_BOT_TOKEN");
-if (string.IsNullOrWhiteSpace(token))
+namespace Assistant.Bot;
+
+internal static class Program
 {
-    Console.Error.WriteLine("TELEGRAM_BOT_TOKEN is not set");
-    return 1;
-}
-
-var allowed = (Environment.GetEnvironmentVariable("TELEGRAM_ALLOWED_USER_IDS") ?? "")
-    .Split(",", StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-    .Select(long.Parse)
-    .ToHashSet();
-
-if (allowed.Count == 0)
-{
-    Console.Error.WriteLine("TELEGRAM_ALLOWED_USER_IDS is empty; nothing would be answered");
-}
-
-using var cts = new CancellationTokenSource();
-Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
-AppDomain.CurrentDomain.ProcessExit += (_, _) => cts.Cancel();
-
-var bot = new TelegramBotClient(token);
-var me = await bot.GetMe(cts.Token);
-Console.WriteLine($"logged in as @{me.Username}");
-
-int offset = 0;
-while (!cts.IsCancellationRequested)
-{
-    Update[] updates;
-    try
+    public static async Task<int> Main()
     {
-        updates = await bot.GetUpdates(offset: offset, timeout: 30, cancellationToken: cts.Token);
-    }
-    catch (OperationCanceledException)
-    {
-        break;
-    }
-    catch (Exception ex)
-    {
-        Console.Error.WriteLine($"getUpdates failed: {ex.Message}");
-        try { await Task.Delay(TimeSpan.FromSeconds(3), cts.Token); } catch (OperationCanceledException) { break; }
-        continue;
-    }
-
-    foreach (var update in updates)
-    {
-        offset = update.Id + 1;
-
-        if (update.Message?.Text is not { } text) continue;
-
-        var fromId = update.Message.From?.Id ?? 0;
-        if (!allowed.Contains(fromId))
+        string token;
+        try
         {
-            Console.WriteLine($"ignored message from {fromId}");
-            continue;
+            token = Env.Require("TELEGRAM_BOT_TOKEN");
         }
+        catch (InvalidOperationException ex)
+        {
+            Console.Error.WriteLine($"[fatal] {ex.Message}");
+            return 1;
+        }
+
+        var allowed = Env.IdSet("TELEGRAM_ALLOWED_USER_IDS");
+        if (allowed.Count == 0)
+        {
+            Console.Error.WriteLine("[warn] TELEGRAM_ALLOWED_USER_IDS is empty: no one will be answered.");
+            Console.Error.WriteLine("[warn] Send a message to the bot, then copy the id from the 'message from <id>' log line.");
+        }
+
+        using var cts = new CancellationTokenSource();
+        Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
+        AppDomain.CurrentDomain.ProcessExit += (_, _) => cts.Cancel();
+
+        var bot = new TelegramBotClient(token);
 
         try
         {
-            await bot.SendMessage(update.Message.Chat.Id, $"echo: {text}", cancellationToken: cts.Token);
+            await BotHost.PrepareAsync(bot, cts.Token);
+            var me = await bot.GetMe(cts.Token);
+            Console.WriteLine($"[info] logged in as @{me.Username}");
+
+            if (allowed.Count > 0)
+            {
+                await BotHost.NotifyStartedAsync(bot, allowed, cts.Token);
+            }
+
+            await BotHost.RunAsync(bot, allowed, cts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (ApiRequestException ex)
+        {
+            Console.Error.WriteLine($"[fatal] {ex.ErrorCode}: {ex.Message}");
+            return 1;
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"sendMessage failed: {ex.Message}");
+            Console.Error.WriteLine($"[fatal] {ex}");
+            return 1;
         }
+
+        Console.WriteLine("[info] stopped");
+        return 0;
     }
 }
-
-Console.WriteLine("stopped");
-return 0;
