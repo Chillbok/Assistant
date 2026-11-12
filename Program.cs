@@ -5,6 +5,10 @@ namespace Assistant.Bot;
 
 internal static class Program
 {
+    private const int ExitTokenMissing = 1;
+    private const int ExitDuplicatePoller = 2;
+    private const int ExitUnauthorized = 3;
+
     public static async Task<int> Main()
     {
         string token;
@@ -14,15 +18,19 @@ internal static class Program
         }
         catch (InvalidOperationException ex)
         {
-            Console.Error.WriteLine($"[fatal] {ex.Message}");
-            return 1;
+            Log.Fatal($"{ex.Message}. Run ./scripts/setup.sh and edit ~/.config/assistant/env.");
+            return ExitTokenMissing;
         }
 
         var allowed = Env.IdSet("TELEGRAM_ALLOWED_USER_IDS");
         if (allowed.Count == 0)
         {
-            Console.Error.WriteLine("[warn] TELEGRAM_ALLOWED_USER_IDS is empty: no one will be answered.");
-            Console.Error.WriteLine("[warn] Send a message to the bot, then copy the id from the 'message from <id>' log line.");
+            Log.Warn("TELEGRAM_ALLOWED_USER_IDS is empty: no one will be answered.");
+            Log.Warn("Send a message to the bot, then copy the id from the 'message from <id>' log line.");
+        }
+        else
+        {
+            Log.Info($"allowed users: {allowed.Count}");
         }
 
         using var cts = new CancellationTokenSource();
@@ -35,30 +43,34 @@ internal static class Program
         {
             var startOffset = await BotHost.PrepareAsync(bot, cts.Token);
             var me = await bot.GetMe(cts.Token);
-            Console.WriteLine($"[info] logged in as @{me.Username}");
+            Log.Info($"logged in as @{me.Username}");
 
             if (allowed.Count > 0)
             {
                 await BotHost.NotifyStartedAsync(bot, allowed, cts.Token);
             }
 
-            await BotHost.RunAsync(bot, allowed, startOffset, cts.Token);
+            var exitCode = await BotHost.RunAsync(bot, allowed, startOffset, cts.Token);
+            if (exitCode != 0)
+            {
+                return exitCode;
+            }
         }
         catch (OperationCanceledException)
         {
         }
-        catch (ApiRequestException ex)
+        catch (ApiRequestException ex) when (ex.ErrorCode == 401)
         {
-            Console.Error.WriteLine($"[fatal] {ex.ErrorCode}: {ex.Message}");
-            return 1;
+            Log.Fatal("401 Unauthorized: check TELEGRAM_BOT_TOKEN at @BotFather.");
+            return ExitUnauthorized;
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"[fatal] {ex}");
+            Log.Exception("unhandled", ex);
             return 1;
         }
 
-        Console.WriteLine("[info] stopped");
+        Log.Info("stopped");
         return 0;
     }
 }

@@ -24,19 +24,19 @@ internal static class Router
         if (!allowed.Contains(fromId))
         {
             var username = message.From?.Username is { } name ? $"@{name}" : "no-username";
-            Console.WriteLine($"[info] message from {fromId} ({username}) ignored");
+            Log.Info($"message from {fromId} ({username}) ignored");
             return;
         }
 
         if (message.Chat.Type != ChatType.Private)
         {
-            Console.WriteLine($"[info] ignored message in {message.Chat.Type} chat {message.Chat.Id}");
+            Log.Info($"ignored message in {message.Chat.Type} chat {message.Chat.Id}");
             return;
         }
 
         if (message.Text is not { } text)
         {
-            Console.WriteLine($"[info] ignored non-text message from {fromId}");
+            Log.Info($"ignored non-text message from {fromId}");
             return;
         }
 
@@ -52,7 +52,7 @@ internal static class Router
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"[error] sendMessage: {ex.Message}");
+            Log.Exception("sendMessage failed", ex);
         }
     }
 }

@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-pattern='[0-9]{8,10}:[A-Za-z0-9_-]{35}'
+# 텔레그램, OpenAI, GitHub, AWS, Google 패턴
+patterns='[0-9]{8,10}:[A-Za-z0-9_-]{35}|sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35}'
 
-if git diff --cached -U0 | grep -qE "^\+.*${pattern}"; then
-  echo "커밋 중단: 텔레그램 토큰으로 보이는 문자열이 스테이징되었습니다." >&2
+if git diff --cached -U0 | grep -qE "^\+.*(${patterns})"; then
+  echo "커밋 중단: 시크릿으로 보이는 문자열이 스테이징되었습니다." >&2
+  echo "확인: git diff --cached" >&2
   exit 1
 fi

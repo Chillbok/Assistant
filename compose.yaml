@@ -4,20 +4,26 @@ services:
   bot:
     build: .
     image: assistant:dev
-    restart: unless-stopped
+    restart: on-failure:5
+    init: true
+    user: "1654:1654"
     env_file:
-      - ${ASSISTANT_ENV:-/home/junho/.config/assistant/env}
+      - ${HOME}/.config/assistant/env
     environment:
-      TZ: Asia/Seoul
+      TZ: ${TZ:-UTC}
       HOME: /tmp
       DOTNET_EnableDiagnostics: "0"
     read_only: true
     tmpfs:
-      - /tmp
+      - /tmp:size=64m,noexec,nosuid,nodev
     cap_drop:
       - ALL
     security_opt:
       - no-new-privileges:true
+    mem_limit: 256m
+    pids_limit: 128
+    ulimits:
+      core: 0
     logging:
       driver: json-file
       options:

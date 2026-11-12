@@ -3,6 +3,7 @@ using System.Threading.Channels;
 using Telegram.Bot;
 using Telegram.Bot.Exceptions;
 using Telegram.Bot.Types;
+using Telegram.Bot.Types.Enums;
 
 namespace Assistant.Bot;
 
@@ -10,20 +11,21 @@ internal static class BotHost
 {
     private const int PollTimeoutSeconds = 30;
     private const int WorkerCount = 4;
+    private const int QueueCapacity = 1000;
 
     public static async Task<int> PrepareAsync(ITelegramBotClient bot, CancellationToken ct)
     {
         var webhook = await bot.GetWebhookInfo(ct);
         if (!string.IsNullOrEmpty(webhook.Url))
         {
-            Console.WriteLine($"[info] removing webhook: {webhook.Url}");
+            Log.Info("removing existing webhook");
             await bot.DeleteWebhook(cancellationToken: ct);
         }
 
         var backlog = await bot.GetUpdates(offset: -1, limit: 1, timeout: 0, cancellationToken: ct);
         if (backlog.Length > 0)
         {
-            Console.WriteLine($"[info] discarding backlog up to update {backlog[^1].Id}");
+            Log.Info($"discarding backlog up to update {backlog[^1].Id}");
             return backlog[^1].Id + 1;
         }
 
@@ -40,14 +42,24 @@ internal static class BotHost
             }
             catch (Exception ex)
             {
-                Console.Error.WriteLine($"[warn] startup notice to {id} failed: {ex.Message}");
+                Log.Exception($"startup notice to {id} failed", ex);
             }
         }
     }
 
-    public static async Task RunAsync(ITelegramBotClient bot, HashSet<long> allowed, int startOffset, CancellationToken ct)
+    public static async Task<int> RunAsync(
+        ITelegramBotClient bot,
+        HashSet<long> allowed,
+        int startOffset,
+        CancellationToken ct)
     {
-        var queue = Channel.CreateUnbounded<Update>();
+        var queue = Channel.CreateBounded<Update>(new BoundedChannelOptions(QueueCapacity)
+        {
+            FullMode = BoundedChannelFullMode.Wait,
+            SingleReader = false,
+        });
+
+        // 유효 사용자만 락을 만들기 때문에 사전 크기가 허용 목록 크기로 제한된다.
         var chatLocks = new ConcurrentDictionary<long, SemaphoreSlim>();
 
         var workers = Enumerable.Range(0, WorkerCount)
@@ -55,6 +67,7 @@ internal static class BotHost
             .ToArray();
 
         var offset = startOffset;
+        var exitCode = 0;
 
         try
         {
@@ -72,18 +85,27 @@ internal static class BotHost
                 catch (ApiRequestException ex) when (ex.ErrorCode == 429)
                 {
                     var wait = ex.Parameters?.RetryAfter ?? 5;
-                    Console.Error.WriteLine($"[warn] rate limited, waiting {wait}s");
+                    Log.Warn($"rate limited, waiting {wait}s");
                     await Task.Delay(TimeSpan.FromSeconds(wait), ct);
                     continue;
                 }
-                catch (ApiRequestException ex) when (ex.ErrorCode is 401 or 409)
+                catch (ApiRequestException ex) when (ex.ErrorCode == 401)
                 {
-                    Console.Error.WriteLine($"[fatal] {ex.ErrorCode}: {ex.Message}");
+                    Log.Fatal("401 Unauthorized: the bot token is invalid or revoked.");
+                    exitCode = 3;
+                    break;
+                }
+                catch (ApiRequestException ex) when (ex.ErrorCode == 409)
+                {
+                    Log.Fatal("409 Conflict: another process is polling with the same token.");
+                    Log.Fatal("Check for a second instance (test bot on another machine) and use a separate token.");
+                    await Task.Delay(TimeSpan.FromSeconds(10), CancellationToken.None);
+                    exitCode = 2;
                     break;
                 }
                 catch (Exception ex)
                 {
-                    Console.Error.WriteLine($"[error] getUpdates: {ex.Message}");
+                    Log.Exception("getUpdates failed", ex);
                     await Task.Delay(TimeSpan.FromSeconds(3), ct);
                     continue;
                 }
@@ -106,6 +128,8 @@ internal static class BotHost
             {
             }
         }
+
+        return exitCode;
     }
 
     private static async Task WorkerAsync(
@@ -120,9 +144,20 @@ internal static class BotHost
         {
             await foreach (var update in reader.ReadAllAsync(ct))
             {
-                var chatId = update.Message?.Chat.Id ?? 0;
-                var gate = chatLocks.GetOrAdd(chatId, _ => new SemaphoreSlim(1, 1));
+                var message = update.Message;
+                var senderId = message?.From?.Id ?? 0;
+                var isTrusted = message is not null
+                    && allowed.Contains(senderId)
+                    && message.Chat.Type == ChatType.Private;
 
+                if (!isTrusted)
+                {
+                    // 인가되지 않은 트래픽은 락 없이 바로 처리(로그 후 폐기)한다.
+                    await Router.HandleAsync(bot, update, allowed, ct);
+                    continue;
+                }
+
+                var gate = chatLocks.GetOrAdd(message!.Chat.Id, _ => new SemaphoreSlim(1, 1));
                 await gate.WaitAsync(ct);
                 try
                 {
@@ -134,7 +169,7 @@ internal static class BotHost
                 }
                 catch (Exception ex)
                 {
-                    Console.Error.WriteLine($"[error] worker{index}: {ex.Message}");
+                    Log.Exception($"worker{index}", ex);
                 }
                 finally
                 {
