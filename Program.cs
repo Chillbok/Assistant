@@ -35,14 +35,24 @@ internal static class Program
 
         using var cts = new CancellationTokenSource();
         Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
-        AppDomain.CurrentDomain.ProcessExit += (_, _) => cts.Cancel();
+        AppDomain.CurrentDomain.ProcessExit += (_, _) =>
+        {
+            try
+            {
+                cts.Cancel();
+            }
+            catch (ObjectDisposedException)
+            {
+                // 종료 중에는 CTS가 이미 해제됐을 수 있다.
+            }
+        };
 
         var bot = new TelegramBotClient(token);
 
         try
         {
+            var me = await BotHost.WaitForTelegramAsync(bot, cts.Token);
             var startOffset = await BotHost.PrepareAsync(bot, cts.Token);
-            var me = await bot.GetMe(cts.Token);
             Log.Info($"logged in as @{me.Username}");
 
             if (allowed.Count > 0)

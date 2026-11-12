@@ -13,6 +13,40 @@ internal static class BotHost
     private const int WorkerCount = 4;
     private const int QueueCapacity = 1000;
 
+    public static async Task<User> WaitForTelegramAsync(ITelegramBotClient bot, CancellationToken ct)
+    {
+        var delay = TimeSpan.FromSeconds(3);
+
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                return await bot.GetMe(ct);
+            }
+            catch (ApiRequestException ex) when (ex.ErrorCode == 401)
+            {
+                throw;
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                if (attempt == 1 || attempt % 10 == 0)
+                {
+                    Log.Exception($"telegram unreachable (attempt {attempt}), retrying", ex);
+                }
+
+                await Task.Delay(delay, ct);
+                if (delay < TimeSpan.FromSeconds(30))
+                {
+                    delay += TimeSpan.FromSeconds(3);
+                }
+            }
+        }
+    }
+
     public static async Task<int> PrepareAsync(ITelegramBotClient bot, CancellationToken ct)
     {
         var webhook = await bot.GetWebhookInfo(ct);
