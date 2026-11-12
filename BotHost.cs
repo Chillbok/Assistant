@@ -11,7 +11,7 @@ internal static class BotHost
     private const int PollTimeoutSeconds = 30;
     private const int WorkerCount = 4;
 
-    public static async Task PrepareAsync(ITelegramBotClient bot, CancellationToken ct)
+    public static async Task<int> PrepareAsync(ITelegramBotClient bot, CancellationToken ct)
     {
         var webhook = await bot.GetWebhookInfo(ct);
         if (!string.IsNullOrEmpty(webhook.Url))
@@ -24,7 +24,10 @@ internal static class BotHost
         if (backlog.Length > 0)
         {
             Console.WriteLine($"[info] discarding backlog up to update {backlog[^1].Id}");
+            return backlog[^1].Id + 1;
         }
+
+        return 0;
     }
 
     public static async Task NotifyStartedAsync(ITelegramBotClient bot, HashSet<long> allowed, CancellationToken ct)
@@ -42,7 +45,7 @@ internal static class BotHost
         }
     }
 
-    public static async Task RunAsync(ITelegramBotClient bot, HashSet<long> allowed, CancellationToken ct)
+    public static async Task RunAsync(ITelegramBotClient bot, HashSet<long> allowed, int startOffset, CancellationToken ct)
     {
         var queue = Channel.CreateUnbounded<Update>();
         var chatLocks = new ConcurrentDictionary<long, SemaphoreSlim>();
@@ -51,7 +54,7 @@ internal static class BotHost
             .Select(index => Task.Run(() => WorkerAsync(index, bot, allowed, queue.Reader, chatLocks, ct), ct))
             .ToArray();
 
-        var offset = 0;
+        var offset = startOffset;
 
         try
         {

@@ -33,7 +33,7 @@ internal static class Program
 
         try
         {
-            await BotHost.PrepareAsync(bot, cts.Token);
+            var startOffset = await BotHost.PrepareAsync(bot, cts.Token);
             var me = await bot.GetMe(cts.Token);
             Console.WriteLine($"[info] logged in as @{me.Username}");
 
@@ -42,7 +42,7 @@ internal static class Program
                 await BotHost.NotifyStartedAsync(bot, allowed, cts.Token);
             }
 
-            await BotHost.RunAsync(bot, allowed, cts.Token);
+            await BotHost.RunAsync(bot, allowed, startOffset, cts.Token);
         }
         catch (OperationCanceledException)
         {
