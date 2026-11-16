@@ -1,3 +1,6 @@
+using System.Runtime.InteropServices;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using Telegram.Bot;
 using Telegram.Bot.Exceptions;
 
@@ -8,9 +11,23 @@ internal static class Program
     private const int ExitTokenMissing = 1;
     private const int ExitDuplicatePoller = 2;
     private const int ExitUnauthorized = 3;
+    private const int ExitConfigMissing = 78;
+    private const string OpenCodeConfigPath = "/etc/assistant/opencode.json";
+    private const string DefaultOpenCodeBin = "/usr/local/bin/opencode";
+
+    private static readonly JsonSerializerOptions ResultJson = new()
+    {
+        WriteIndented = true,
+        Converters = { new JsonStringEnumConverter() },
+    };
 
     public static async Task<int> Main()
     {
+        if (Environment.GetEnvironmentVariable("ASSISTANT_RUN_ONCE") is { Length: > 0 } instruction)
+        {
+            return await RunOnceAsync(instruction);
+        }
+
         string token;
         try
         {
@@ -34,18 +51,11 @@ internal static class Program
         }
 
         using var cts = new CancellationTokenSource();
-        Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
-        AppDomain.CurrentDomain.ProcessExit += (_, _) =>
+        using var interrupt = PosixSignalRegistration.Create(PosixSignal.SIGINT, context =>
         {
-            try
-            {
-                cts.Cancel();
-            }
-            catch (ObjectDisposedException)
-            {
-                // 종료 중에는 CTS가 이미 해제됐을 수 있다.
-            }
-        };
+            context.Cancel = true;
+            cts.Cancel();
+        });
 
         var bot = new TelegramBotClient(token);
 
@@ -82,5 +92,48 @@ internal static class Program
 
         Log.Info("stopped");
         return 0;
+    }
+
+    private static async Task<int> RunOnceAsync(string instruction)
+    {
+        if (!File.Exists(OpenCodeConfigPath))
+        {
+            Log.Fatal($"{OpenCodeConfigPath} is missing: refusing to run opencode without permission rules.");
+            return ExitConfigMissing;
+        }
+
+        var binary = Environment.GetEnvironmentVariable("ASSISTANT_OPENCODE_BIN");
+        binary = string.IsNullOrWhiteSpace(binary) ? DefaultOpenCodeBin : binary.Trim();
+        if (!binary.StartsWith('/'))
+        {
+            Log.Fatal($"ASSISTANT_OPENCODE_BIN must be an absolute path: {binary}");
+            return ExitConfigMissing;
+        }
+
+        using var cts = new CancellationTokenSource();
+        using var term = PosixSignalRegistration.Create(PosixSignal.SIGTERM, context =>
+        {
+            context.Cancel = true;
+            cts.Cancel();
+        });
+        using var interrupt = PosixSignalRegistration.Create(PosixSignal.SIGINT, context =>
+        {
+            context.Cancel = true;
+            cts.Cancel();
+        });
+
+        Log.Info($"run-once: {instruction.Length} chars, timeout {Runner.TimeoutSeconds()}s, bin {binary}");
+
+        var result = await Runner.RunAsync(binary, instruction, cts.Token);
+        Console.WriteLine(JsonSerializer.Serialize(result, ResultJson));
+
+        return result.Kind switch
+        {
+            ExitKind.Success => 0,
+            ExitKind.Timeout => 124,
+            ExitKind.Cancelled => 130,
+            ExitKind.RunnerError => 127,
+            _ => result.ExitCode == 0 ? 1 : result.ExitCode,
+        };
     }
 }

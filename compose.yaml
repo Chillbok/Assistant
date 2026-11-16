@@ -11,8 +11,22 @@ services:
       - ${HOME}/.config/assistant/env
     environment:
       TZ: ${TZ:-UTC}
-      HOME: /tmp
+      HOME: /state
+      XDG_DATA_HOME: /state/data
+      XDG_CACHE_HOME: /state/cache
+      XDG_CONFIG_HOME: /state/config
+      XDG_STATE_HOME: /state/state
+      TMPDIR: /tmp
+      OPENCODE_CONFIG: /etc/assistant/opencode.json
+      OPENCODE_DISABLE_PROJECT_CONFIG: "1"
+      OPENCODE_DISABLE_AUTOUPDATE: "1"
       DOTNET_EnableDiagnostics: "0"
+    volumes:
+      # 샌드박스는 컨테이너 uid 1654 소유로 1회 chown한다. 호스트 계정에서는 읽기만 가능하다.
+      - ${HOME}/Repositories/opencode-sandbox:/work
+      - ${HOME}/.opencode/bin/opencode:/usr/local/bin/opencode:ro
+      # opencode는 $XDG_CACHE_HOME/opencode/bin/rg를 실행한다. tmpfs(noexec)로 두면 즉시 실패한다.
+      - opencode-state:/state
     # 부팅 시 Tailscale이 /etc/resolv.conf를 덮어쓰기 전에 Docker가 시작하면
     # 컨테이너 DNS가 비어 버린다. 순서에 의존하지 않도록 명시한다.
     dns:
@@ -20,13 +34,15 @@ services:
       - 1.1.1.1
     read_only: true
     tmpfs:
-      - /tmp:size=64m,noexec,nosuid,nodev
+      # tmpfs는 mem_limit에 계상된다.
+      - /tmp:size=256m,noexec,nosuid,nodev
     cap_drop:
       - ALL
     security_opt:
       - no-new-privileges:true
-    mem_limit: 256m
-    pids_limit: 128
+    mem_limit: 2g
+    memswap_limit: 2g
+    pids_limit: 512
     ulimits:
       core: 0
     logging:
@@ -34,3 +50,8 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+volumes:
+  opencode-state:
+    name: assistant_opencode-state
+    external: true
