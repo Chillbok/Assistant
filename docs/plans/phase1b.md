@@ -279,6 +279,13 @@ DOTNET_ROLL_FORWARD=Major dotnet test tests/Assistant.Bot.Tests
 
 요약과 변경 파일 목록(2번), repo 선택과 되묻기(3번), 캡처, cron, 스레드, 승인, `/ping`, `/cancel`, SSH/CouchDB/Syncthing/토큰 회전, 러너 컨테이너 분리, `--format json` 전환, job 상태 영속화, `index.lock` 자동 정리, stderr 에러 라인 휴리스틱
 
+## 진행 상태
+
+- 2026-11-23: 구현 완료 (커밋 `7031e38`). 로컬 Debug/Release 빌드 경고 0, 단위 테스트 13개 통과
+- 단위 테스트는 경로를 명시해야 한다. 루트 `dotnet test`는 0개로 성공한다
+- 서버 배포 시도: `my-server`(p14s)가 Tailscale에서 offline(마지막 접속 3일 전)이라 ssh 타임아웃. 배포와 검증 0~10은 보류
+- 다음 순서: 서버 기동 -> `deploy.sh` -> 검증 0~3(봇 없이 가능) -> 폰 테스트 4, 5, 7, 8, 9
+
 ## 참조
 
 - 로드맵: `docs/roadmap.md`
