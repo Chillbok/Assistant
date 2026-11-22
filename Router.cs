@@ -6,12 +6,11 @@ namespace Assistant.Bot;
 
 internal static class Router
 {
-    private const int MaxReplyLength = 4096;
-
     public static async Task HandleAsync(
         ITelegramBotClient bot,
         Update update,
         HashSet<long> allowed,
+        string binary,
         CancellationToken ct)
     {
         var message = update.Message;
@@ -40,19 +39,12 @@ internal static class Router
             return;
         }
 
-        var reply = $"echo: {text}";
-        if (reply.Length > MaxReplyLength)
+        if (string.IsNullOrWhiteSpace(text))
         {
-            reply = reply[..MaxReplyLength];
+            Log.Info($"ignored empty message from {fromId}");
+            return;
         }
 
-        try
-        {
-            await bot.SendMessage(message.Chat.Id, reply, cancellationToken: ct);
-        }
-        catch (Exception ex)
-        {
-            Log.Exception("sendMessage failed", ex);
-        }
+        await Delegation.HandleAsync(bot, message, text, binary, ct);
     }
 }

@@ -1,9 +1,7 @@
-using System.Collections.Concurrent;
 using System.Threading.Channels;
 using Telegram.Bot;
 using Telegram.Bot.Exceptions;
 using Telegram.Bot.Types;
-using Telegram.Bot.Types.Enums;
 
 namespace Assistant.Bot;
 
@@ -85,6 +83,7 @@ internal static class BotHost
         ITelegramBotClient bot,
         HashSet<long> allowed,
         int startOffset,
+        string binary,
         CancellationToken ct)
     {
         var queue = Channel.CreateBounded<Update>(new BoundedChannelOptions(QueueCapacity)
@@ -93,11 +92,8 @@ internal static class BotHost
             SingleReader = false,
         });
 
-        // 유효 사용자만 락을 만들기 때문에 사전 크기가 허용 목록 크기로 제한된다.
-        var chatLocks = new ConcurrentDictionary<long, SemaphoreSlim>();
-
         var workers = Enumerable.Range(0, WorkerCount)
-            .Select(index => Task.Run(() => WorkerAsync(index, bot, allowed, queue.Reader, chatLocks, ct), ct))
+            .Select(index => Task.Run(() => WorkerAsync(index, bot, allowed, queue.Reader, binary, ct), ct))
             .ToArray();
 
         var offset = startOffset;
@@ -112,9 +108,15 @@ internal static class BotHost
                 {
                     updates = await bot.GetUpdates(offset: offset, timeout: PollTimeoutSeconds, cancellationToken: ct);
                 }
-                catch (OperationCanceledException)
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
                 {
                     break;
+                }
+                catch (OperationCanceledException)
+                {
+                    Log.Warn("getUpdates cancelled unexpectedly, retrying");
+                    await Task.Delay(TimeSpan.FromSeconds(1), ct);
+                    continue;
                 }
                 catch (ApiRequestException ex) when (ex.ErrorCode == 429)
                 {
@@ -154,6 +156,11 @@ internal static class BotHost
         finally
         {
             queue.Writer.TryComplete();
+            if (ct.IsCancellationRequested)
+            {
+                Log.Info($"shutdown: dropping {queue.Reader.Count} queued updates");
+            }
+
             try
             {
                 await Task.WhenAll(workers);
@@ -171,43 +178,26 @@ internal static class BotHost
         ITelegramBotClient bot,
         HashSet<long> allowed,
         ChannelReader<Update> reader,
-        ConcurrentDictionary<long, SemaphoreSlim> chatLocks,
+        string binary,
         CancellationToken ct)
     {
         try
         {
             await foreach (var update in reader.ReadAllAsync(ct))
             {
-                var message = update.Message;
-                var senderId = message?.From?.Id ?? 0;
-                var isTrusted = message is not null
-                    && allowed.Contains(senderId)
-                    && message.Chat.Type == ChatType.Private;
-
-                if (!isTrusted)
-                {
-                    // 인가되지 않은 트래픽은 락 없이 바로 처리(로그 후 폐기)한다.
-                    await Router.HandleAsync(bot, update, allowed, ct);
-                    continue;
-                }
-
-                var gate = chatLocks.GetOrAdd(message!.Chat.Id, _ => new SemaphoreSlim(1, 1));
-                await gate.WaitAsync(ct);
                 try
                 {
-                    await Router.HandleAsync(bot, update, allowed, ct);
+                    // 전역 위임 슬롯이 하나이므로 chat별 게이트는 두지 않는다.
+                    await Router.HandleAsync(bot, update, allowed, binary, ct);
                 }
-                catch (OperationCanceledException)
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
                 {
                     throw;
                 }
                 catch (Exception ex)
                 {
+                    // 워커 예외가 WhenAll 밖으로 나가 재기동 루프가 되지 않게 한다.
                     Log.Exception($"worker{index}", ex);
-                }
-                finally
-                {
-                    gate.Release();
                 }
             }
         }

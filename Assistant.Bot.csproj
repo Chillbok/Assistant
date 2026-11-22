@@ -14,4 +14,14 @@
     <PackageReference Include="Telegram.Bot" Version="22.10.4" />
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="Assistant.Bot.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 루트 프로젝트의 기본 glob이 테스트 소스를 끌어오지 않게 한다. -->
+    <Compile Remove="tests/**" />
+    <None Remove="tests/**" />
+  </ItemGroup>
+
 </Project>

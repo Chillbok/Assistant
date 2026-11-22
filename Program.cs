@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -13,7 +14,6 @@ internal static class Program
     private const int ExitUnauthorized = 3;
     private const int ExitConfigMissing = 78;
     private const string OpenCodeConfigPath = "/etc/assistant/opencode.json";
-    private const string DefaultOpenCodeBin = "/usr/local/bin/opencode";
 
     private static readonly JsonSerializerOptions ResultJson = new()
     {
@@ -50,10 +50,39 @@ internal static class Program
             Log.Info($"allowed users: {allowed.Count}");
         }
 
+        string binary;
+        try
+        {
+            binary = Runner.SelectBotBinary(out var diagnostic);
+            if (diagnostic)
+            {
+                Log.Warn("diagnostic binary in use");
+            }
+        }
+        catch (InvalidOperationException ex)
+        {
+            Log.Fatal(ex.Message);
+            return ExitConfigMissing;
+        }
+
+        if (!File.Exists(OpenCodeConfigPath))
+        {
+            Log.Fatal($"{OpenCodeConfigPath} is missing: refusing to run opencode without permission rules.");
+            return ExitConfigMissing;
+        }
+
+        Log.Info($"timeout {Runner.TimeoutSeconds()}s, bin {binary}");
+
         using var cts = new CancellationTokenSource();
         using var interrupt = PosixSignalRegistration.Create(PosixSignal.SIGINT, context =>
         {
             context.Cancel = true;
+            cts.Cancel();
+        });
+        using var terminate = PosixSignalRegistration.Create(PosixSignal.SIGTERM, context =>
+        {
+            context.Cancel = true;
+            Log.Info("SIGTERM: shutting down");
             cts.Cancel();
         });
 
@@ -70,7 +99,13 @@ internal static class Program
                 await BotHost.NotifyStartedAsync(bot, allowed, cts.Token);
             }
 
-            var exitCode = await BotHost.RunAsync(bot, allowed, startOffset, cts.Token);
+            var stopwatch = Stopwatch.StartNew();
+            var exitCode = await BotHost.RunAsync(bot, allowed, startOffset, binary, cts.Token);
+            if (cts.IsCancellationRequested)
+            {
+                Log.Info($"shutdown took {stopwatch.Elapsed.TotalSeconds:0.0}s");
+            }
+
             if (exitCode != 0)
             {
                 return exitCode;
@@ -102,11 +137,14 @@ internal static class Program
             return ExitConfigMissing;
         }
 
-        var binary = Environment.GetEnvironmentVariable("ASSISTANT_OPENCODE_BIN");
-        binary = string.IsNullOrWhiteSpace(binary) ? DefaultOpenCodeBin : binary.Trim();
-        if (!binary.StartsWith('/'))
+        string binary;
+        try
         {
-            Log.Fatal($"ASSISTANT_OPENCODE_BIN must be an absolute path: {binary}");
+            binary = Runner.ResolveBinary(Environment.GetEnvironmentVariable("ASSISTANT_OPENCODE_BIN"));
+        }
+        catch (InvalidOperationException ex)
+        {
+            Log.Fatal(ex.Message);
             return ExitConfigMissing;
         }
 

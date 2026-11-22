@@ -9,6 +9,7 @@ env.*
 secrets/
 bin/
 obj/
+tests/
 data/
 logs/
 README.md

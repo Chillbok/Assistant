@@ -25,7 +25,9 @@ internal sealed record RunResult(
     int Pgid,
     ExitKind Kind,
     string Stdout,
+    string StdoutTail,
     string Stderr,
+    string StderrTail,
     bool StdoutTruncated,
     bool StderrTruncated,
     long TotalStdoutBytes,
@@ -33,7 +35,10 @@ internal sealed record RunResult(
 
 internal static class Runner
 {
+    public const string DefaultBinary = "/usr/local/bin/opencode";
+
     private const int OutputLimit = 1 << 20;
+    private const int TailCapacity = 64 * 1024;
     private const int DefaultTimeoutSeconds = 300;
     private const int TermGraceMilliseconds = 2500;
     private const int DrainGraceSeconds = 2;
@@ -55,13 +60,55 @@ internal static class Runner
     public static int TimeoutSeconds()
     {
         var raw = Environment.GetEnvironmentVariable("ASSISTANT_JOB_TIMEOUT_SECONDS");
-        if (int.TryParse(raw, out var seconds))
+        if (int.TryParse(raw?.Trim(), out var seconds))
         {
             return Math.Clamp(seconds, 1, 3600);
         }
 
         return DefaultTimeoutSeconds;
     }
+
+    public static string ResolveBinary(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return DefaultBinary;
+        }
+
+        var binary = raw.Trim();
+        if (!binary.StartsWith('/'))
+        {
+            throw new InvalidOperationException($"ASSISTANT_OPENCODE_BIN must be an absolute path: {binary}");
+        }
+
+        return binary;
+    }
+
+    public static string SelectBotBinary(out bool diagnostic)
+    {
+        diagnostic = false;
+        var raw = Environment.GetEnvironmentVariable("ASSISTANT_OPENCODE_BIN");
+        var enabled = string.Equals(
+            Environment.GetEnvironmentVariable("ASSISTANT_DIAGNOSTIC")?.Trim(),
+            "1",
+            StringComparison.Ordinal);
+
+        if (!enabled || string.IsNullOrWhiteSpace(raw))
+        {
+            return DefaultBinary;
+        }
+
+        diagnostic = true;
+        return ResolveBinary(raw);
+    }
+
+    public static RunResult CancelledResult() => new(
+        -1, false, true, 0, 0, 0, 0, ExitKind.Cancelled,
+        string.Empty, string.Empty, string.Empty, string.Empty, false, false, 0, 0);
+
+    public static RunResult ErrorResult() => new(
+        127, false, false, 0, 0, 0, 0, ExitKind.RunnerError,
+        string.Empty, string.Empty, string.Empty, string.Empty, false, false, 0, 0);
 
     public static async Task<RunResult> RunAsync(string binary, string instruction, CancellationToken ct)
     {
@@ -104,13 +151,20 @@ internal static class Runner
             stopwatch.Stop();
             Log.Error($"runner start failed: {ex.GetType().Name}: {ex.Message}");
             return new RunResult(127, false, false, Math.Round(stopwatch.Elapsed.TotalSeconds, 2), 0, 0, 0,
-                ExitKind.RunnerError, string.Empty, ex.Message, false, false, 0, 0);
+                ExitKind.RunnerError, string.Empty, string.Empty, ex.Message, ex.Message, false, false, 0, 0);
         }
 
         using (process)
         {
             // compose run은 stdin 파이프를 열어둔 채 시작한다. EOF를 보내 자식이 입력 대기로 멈추지 않게 한다.
-            process.StandardInput.Close();
+            try
+            {
+                process.StandardInput.Close();
+            }
+            catch (Exception ex) when (ex is IOException or InvalidOperationException)
+            {
+                Log.Warn($"stdin close failed: {ex.GetType().Name}");
+            }
 
             var pgid = await ResolvePgidAsync(process.Id);
             if (pgid != process.Id)
@@ -135,9 +189,13 @@ internal static class Runner
             }
             catch (OperationCanceledException)
             {
-                timedOut = !ct.IsCancellationRequested;
-                cancelled = ct.IsCancellationRequested;
-                await KillGroupAsync(pgid, process);
+                // 취소가 도착하기 직전에 정상 종료했을 수 있다. 결과를 버리지 않는다.
+                if (!process.HasExited)
+                {
+                    timedOut = !ct.IsCancellationRequested;
+                    cancelled = ct.IsCancellationRequested;
+                    await KillGroupAsync(pgid, process);
+                }
             }
 
             var (alive, zombies) = ScanGroup(pgid);
@@ -171,7 +229,9 @@ internal static class Runner
                 pgid,
                 kind,
                 stdout.Text,
+                stdout.TailText,
                 stderr.Text,
+                stderr.TailText,
                 stdout.Truncated,
                 stderr.Truncated,
                 stdout.Total,
@@ -417,6 +477,10 @@ internal static class Runner
     {
         private readonly MemoryStream buffer = new();
         private readonly int limit;
+        private readonly byte[] tail = new byte[TailCapacity];
+        private readonly object gate = new();
+        private int tailWrite;
+        private int tailCount;
 
         public Capture(int limit)
         {
@@ -427,26 +491,94 @@ internal static class Runner
 
         public bool Truncated { get; private set; }
 
-        public string Text => Encoding.UTF8.GetString(buffer.ToArray());
+        public string Text
+        {
+            get
+            {
+                lock (gate)
+                {
+                    return Encoding.UTF8.GetString(buffer.ToArray());
+                }
+            }
+        }
+
+        public string TailText
+        {
+            get
+            {
+                lock (gate)
+                {
+                    if (tailCount == 0)
+                    {
+                        return string.Empty;
+                    }
+
+                    var bytes = new byte[tailCount];
+                    var start = (tailWrite - tailCount + TailCapacity) % TailCapacity;
+                    for (var i = 0; i < tailCount; i++)
+                    {
+                        bytes[i] = tail[(start + i) % TailCapacity];
+                    }
+
+                    // 링의 시작이 UTF-8 문자 중간이면 연속 바이트를 건너뛴다.
+                    var offset = 0;
+                    while (offset < bytes.Length && (bytes[offset] & 0xC0) == 0x80)
+                    {
+                        offset++;
+                    }
+
+                    var text = Encoding.UTF8.GetString(bytes, offset, bytes.Length - offset);
+
+                    // SIGKILL로 마지막 문자가 잘리면 U+FFFD가 붙는다. 최대 3개만 제거한다.
+                    var removed = 0;
+                    while (removed < 3 && text.EndsWith('\uFFFD'))
+                    {
+                        text = text[..^1];
+                        removed++;
+                    }
+
+                    return text;
+                }
+            }
+        }
 
         public void Append(ReadOnlySpan<byte> chunk)
         {
-            Total += chunk.Length;
-            var room = limit - (int)buffer.Length;
-            if (room <= 0)
+            lock (gate)
             {
-                Truncated = true;
-                return;
-            }
+                Total += chunk.Length;
+                AppendTail(chunk);
 
-            if (chunk.Length > room)
+                var room = limit - (int)buffer.Length;
+                if (room <= 0)
+                {
+                    Truncated = true;
+                    return;
+                }
+
+                if (chunk.Length > room)
+                {
+                    buffer.Write(chunk[..room]);
+                    Truncated = true;
+                }
+                else
+                {
+                    buffer.Write(chunk);
+                }
+            }
+        }
+
+        private void AppendTail(ReadOnlySpan<byte> chunk)
+        {
+            foreach (var value in chunk)
             {
-                buffer.Write(chunk[..room]);
-                Truncated = true;
-                return;
+                tail[tailWrite] = value;
+                tailWrite = (tailWrite + 1) % TailCapacity;
+                if (tailCount < TailCapacity)
+                {
+                    tailCount++;
+                }
             }
-
-            buffer.Write(chunk);
         }
     }
 }
